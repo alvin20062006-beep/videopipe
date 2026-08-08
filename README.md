@@ -2,7 +2,7 @@
 
 VideoPipe 是一个以网页端为主的视频链接下载器。用户粘贴视频链接或分享文本后，可以解析视频信息、选择最佳画质、720P 或 480P，并将视频下载到本地。
 
-当前仓库是 V1 测试版本，暂不包含广告、会员、支付、AI 翻译、配音、登录内容与 Cookie 导入。
+当前仓库是 V1 Windows 版本，暂不包含广告、会员、支付、AI 翻译、配音、登录内容与 Cookie 导入。
 
 ## V1 功能
 
@@ -29,12 +29,14 @@ VideoPipe 是一个以网页端为主的视频链接下载器。用户粘贴视�
 
 当前版本面向 Windows：
 
+- Windows 10/11 64 位
+- PowerShell 5.1+
 - Python 3.11+
 - Microsoft Edge
 - Aria2 Windows 可执行文件
 - N_m3u8DL-RE Windows 可执行文件
 
-第三方二进制文件不会提交到仓库，请放置在以下路径：
+第三方二进制文件不会提交到仓库。一键安装脚本会从 [aria2/aria2](https://github.com/aria2/aria2/releases) 和 [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE/releases) 的官方 GitHub Releases 下载并校验文件，然后放置在以下路径：
 
 ```text
 vendor/
@@ -47,7 +49,32 @@ vendor/
 
 FFmpeg 由 `imageio-ffmpeg` Python 依赖提供。
 
-## 本地启动
+## 一键安装与启动
+
+克隆或下载仓库后，在项目目录打开 PowerShell。首次安装需要连接互联网：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-dependencies.ps1
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+安装脚本只会写入当前项目的 `.venv/` 和 `vendor/`，不会申请管理员权限或修改系统目录。它会：
+
+- 创建独立 Python 虚拟环境
+- 安装 `requirements.txt`
+- 从官方发布页下载并校验 Aria2
+- 从官方发布页下载并校验 N_m3u8DL-RE
+- 检查 FFmpeg、Microsoft Edge 和核心模块
+
+以后只需运行：
+
+```powershell
+.\start.ps1
+```
+
+如果依赖缺失，启动脚本会先询问是否执行安装。GitHub 下载和 `git clone` 不会自动执行本地脚本，这是必要的安全机制。
+
+## 手动启动
 
 ```powershell
 python -m venv .venv
@@ -79,7 +106,7 @@ http://127.0.0.1:8765/
 - Python 虚拟环境与缓存
 - 任务数据库和下载文件
 - 未完成的下载分片
-- 第三方下载器二进制文件
+- 第三方下载器二进制文件（由安装脚本获取）
 
 ## 当前验证范围
 
