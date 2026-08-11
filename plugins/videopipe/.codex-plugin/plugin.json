@@ -1,7 +1,7 @@
 {
   "name": "videopipe",
-  "version": "1.0.0+codex.20260811104056",
-  "description": "Install, use, update, and troubleshoot VideoPipe on Windows.",
+  "version": "1.0.0+codex.20260811122252",
+  "description": "Find and operate VideoPipe locally to download media on Windows.",
   "author": {
     "name": "Alvin",
     "url": "https://github.com/alvin20062006-beep"
@@ -18,21 +18,21 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "VideoPipe",
-    "shortDescription": "Install, use, and troubleshoot VideoPipe",
-    "longDescription": "Guides users through downloading, installing, running, updating, and troubleshooting the VideoPipe Windows application, with privacy-aware and bandwidth-conscious steps.",
+    "shortDescription": "Download media with local VideoPipe",
+    "longDescription": "Finds an existing VideoPipe installation, asks before installing it when missing, then uses VideoPipe locally to analyze and download media while preserving completed files and bandwidth.",
     "developerName": "Alvin",
     "category": "Productivity",
     "capabilities": [
-      "Instructions",
-      "Read"
+      "Interactive",
+      "Write"
     ],
     "websiteURL": "https://alvin20062006-beep.github.io/videopipe/",
     "privacyPolicyURL": "https://alvin20062006-beep.github.io/videopipe/privacy.html",
     "termsOfServiceURL": "https://alvin20062006-beep.github.io/videopipe/terms.html",
     "defaultPrompt": [
-      "Help me install and start VideoPipe on Windows.",
-      "Troubleshoot a VideoPipe download or startup problem.",
-      "Explain how to use VideoPipe safely."
+      "Download this media link with VideoPipe.",
+      "Find my existing VideoPipe and return the MP4 path.",
+      "Troubleshoot a VideoPipe download or startup problem."
     ],
     "brandColor": "#1267F4",
     "composerIcon": "./assets/videopipe-mark.svg",

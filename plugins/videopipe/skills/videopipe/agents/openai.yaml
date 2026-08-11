@@ -1,7 +1,7 @@
 interface:
   display_name: "VideoPipe"
-  short_description: "Install, use, and troubleshoot VideoPipe"
+  short_description: "Download media with local VideoPipe"
   icon_small: "./assets/videopipe-mark.svg"
   icon_large: "./assets/videopipe-mark.svg"
   brand_color: "#1267F4"
-  default_prompt: "Use $videopipe to help me install and use VideoPipe on Windows."
+  default_prompt: "Use $videopipe to download this media link with my local VideoPipe and return the MP4 path."

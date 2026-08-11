@@ -1,64 +1,53 @@
 ---
 name: videopipe
-description: Guide users through installing, starting, using, updating, and troubleshooting the VideoPipe Windows application. Use when a user mentions VideoPipe, asks how to download or run its portable release, encounters startup or download errors, needs to locate downloaded files, wants to update safely, or wants privacy and bandwidth guidance for VideoPipe.
+description: Find, install with permission, start, operate, update, and troubleshoot the VideoPipe Windows application. Use when a user explicitly asks VideoPipe to analyze or download a media URL, asks for an MP4, wants the completed local file or path, needs the portable release, or encounters a VideoPipe startup or download error.
 ---
 
 # VideoPipe
 
-Help users operate VideoPipe safely and with minimal unnecessary downloads. Treat this as an instruction-only skill: it does not run the Windows application or download media inside ChatGPT.
+Operate VideoPipe locally instead of merely explaining its UI. Keep downloads, task records, configuration, and unrelated repository changes intact.
 
-## Choose the workflow
+## Download a user-provided link
 
-1. Determine whether the user has the Windows portable release or a source checkout.
-2. Preserve existing downloads, task records, configuration, and unrelated repository changes.
-3. Prefer inspection and repair over reinstalling or downloading dependencies.
-4. Ask before downloading the approximately 128 MiB portable package or performing destructive cleanup.
+1. Treat the user's explicit request to download a supplied URL as permission to start; do not ask a redundant confirmation question. Never bypass DRM, authentication, paywalls, private-account access, or other access controls.
+2. Run `python scripts/videopipe_local.py detect` from this skill directory.
+3. If VideoPipe is found, reuse that installation. Do not reinstall dependencies or download the portable package.
+4. If it is not found, explain that the official portable ZIP is approximately 128 MiB and ask before downloading it. After approval, download it once from the official release URL, extract the complete archive into a normal writable folder, then run detection again.
+5. Run `python scripts/videopipe_local.py download "<URL>" --quality best`. Use `--quality 720` or `--quality 480` only when requested. Pass `--root "<path>"` when detection returns multiple installations and the intended one is known.
+6. Wait for the command to finish. It returns JSON containing `status`, `path`, `filename`, and whether an existing completed file was reused.
+7. Verify that the returned absolute path exists. Give the user the clickable absolute path first. When the client supports local media rendering or attachments and the file size permits it, also present the MP4 directly; never upload it to a third party without permission.
 
-## Install the portable release
+The helper launches VideoPipe's own bundled `runtime/python.exe` or source `.venv` and calls the existing VideoPipe downloader. It does not contain a second download engine. It checks the local task database first and must reuse a matching completed file instead of downloading it again.
 
-Use these official locations:
+## Find or install VideoPipe
+
+The helper checks an explicit `--root`, `VIDEOPIPE_HOME`, the current repository, and common Windows Desktop, Documents, Downloads, OneDrive, and local-app folders. A valid installation contains `app.py`, `desktop.py`, and `static/`.
+
+Official locations:
 
 - Product website: `https://alvin20062006-beep.github.io/videopipe/`
 - Release page: `https://github.com/alvin20062006-beep/videopipe/releases/tag/v1.0`
-- Windows package: `https://github.com/alvin20062006-beep/videopipe/releases/download/v1.0/VideoPipe-1.0-Windows-x64-portable.zip`
+- Portable ZIP: `https://github.com/alvin20062006-beep/videopipe/releases/download/v1.0/VideoPipe-1.0-Windows-x64-portable.zip`
 
-Tell the user to:
+For an approved installation:
 
 1. Download the ZIP once.
-2. Extract the entire archive to a normal writable folder.
+2. Extract the entire archive without overwriting an existing installation.
 3. Keep `runtime`, `static`, and `vendor` beside `VideoPipe.cmd`.
-4. Double-click `VideoPipe.cmd`.
+4. Do not separately install Python, FFmpeg, yt-dlp, aria2, or N_m3u8DL-RE; the portable package includes them.
 
-Do not tell portable-release users to install Python, FFmpeg, yt-dlp, aria2, or N_m3u8DL-RE separately; the package already includes them. Windows 10/11 64-bit and Microsoft Edge WebView2 Runtime are required.
+Windows 10/11 64-bit and Microsoft Edge WebView2 Runtime are required for the desktop window. Headless local downloads use the bundled runtime and do not require opening the window.
 
-## Run from source
+## Preserve state and bandwidth
 
-Use the repository instructions only when the user explicitly wants source development. Distinguish source setup from the portable release and warn before dependency installation because it uses network traffic.
-
-Repository: `https://github.com/alvin20062006-beep/videopipe`
+- Never delete `data/` or a completed file unless the user explicitly asks and confirms the exact target.
+- Never call `/api/jobs/{job_id}/file` just to obtain a local result; that delivery endpoint removes the job directory after delivery.
+- Do not restart completed jobs after an application or computer restart.
+- Inspect a failed or interrupted job before retrying it and explain the expected network usage before a large retry.
+- Redact sensitive query parameters from logs and screenshots. Never request cookies, passwords, private links, or downloaded media.
 
 ## Troubleshoot
 
-Start with the exact error message, screenshot, affected URL type, and whether the problem occurs before or after the window opens.
+For startup failures, confirm the ZIP was fully extracted and that `runtime/pythonw.exe`, `desktop.py`, `static/`, and `vendor/` exist. Run `runtime\python.exe desktop.py` from the installation directory only when the user asks to diagnose startup and capture the exact error. Preserve `data/` throughout repair.
 
-For startup failures:
-
-1. Confirm the ZIP was fully extracted.
-2. Confirm `runtime/pythonw.exe`, `desktop.py`, `static/`, and `vendor/` exist.
-3. Check whether Microsoft Edge WebView2 Runtime is available.
-4. To expose a hidden startup error, run `runtime\python.exe desktop.py` from the extracted VideoPipe directory and capture the output.
-5. Avoid deleting `data/` unless the user explicitly approves losing local task records.
-
-For download failures:
-
-1. Confirm the user owns or is authorized to download the content.
-2. Record the selected quality and whether the source is a normal page, direct media URL, HLS, DASH, or MSS stream.
-3. Preserve completed files and inspect the task state before retrying.
-4. Do not automatically restart completed downloads after an application restart.
-5. Explain expected network usage before retrying a large download.
-
-## Privacy and safety
-
-Never request cookies, passwords, private account links, or downloaded media. Redact sensitive query parameters from logs and screenshots. Remind users that VideoPipe contacts the linked website during parsing and that some public WeChat Channels links may use a third-party resolver.
-
-Only assist with content the user owns, purchased, or is authorized to use. Do not provide instructions for bypassing DRM, authentication, paywalls, or access controls.
+For download failures, report the affected URL type, selected quality, VideoPipe path, and exact sanitized error. Do not silently fall back to an unrelated downloader.
