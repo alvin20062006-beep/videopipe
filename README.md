@@ -12,11 +12,13 @@
   <a href="https://github.com/alvin20062006-beep/videopipe/issues">问题反馈</a>
 </p>
 
+VideoPipe 1.0 是一个本地运行的视频链接下载器。输入视频链接或分享文本后，可以解析视频信息、选择画质，并在浏览器中保存下载结果。
+
 <p align="center">
   <img src="docs/assets/videopipe-app.png" width="100%" alt="VideoPipe 界面">
 </p>
 
-VideoPipe 1.0 是一个本地运行的视频链接下载器。输入视频链接或分享文本后，可以解析视频信息、选择画质，并在浏览器中保存下载结果。
+
 
 ## 功能
 
