@@ -1,0 +1,21 @@
+{
+  "name": "videopipe",
+  "interface": {
+    "displayName": "VideoPipe"
+  },
+  "plugins": [
+    {
+      "name": "videopipe",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/alvin20062006-beep/videopipe.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

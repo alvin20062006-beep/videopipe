@@ -1,0 +1,4 @@
+interface:
+  display_name: "VideoPipe"
+  short_description: "Install, use, and troubleshoot VideoPipe"
+  default_prompt: "Help me install and use VideoPipe on Windows."

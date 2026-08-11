@@ -204,6 +204,16 @@ footer { border-top: 1px solid var(--line); }
 .footer-inner { color: #6b7688; font-size: 14px; }
 .footer-inner span { color: var(--ink); font-weight: 750; }
 .footer-inner a:hover { color: var(--blue); }
+.footer-links { display: flex; align-items: center; flex-wrap: wrap; gap: 22px; }
+
+.legal-main { padding: 72px 0 104px; }
+.legal-card { max-width: 820px; }
+.legal-card h1 { margin: 0 0 14px; font-size: clamp(42px, 7vw, 70px); letter-spacing: -.055em; }
+.legal-card .updated { margin: 0 0 42px; color: var(--muted); }
+.legal-card h2 { margin: 38px 0 12px; font-size: 24px; letter-spacing: -.025em; }
+.legal-card p, .legal-card li { color: var(--muted); }
+.legal-card ul { padding-left: 22px; }
+.legal-card a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
 
 @media (max-width: 920px) {
   .hero { min-height: auto; padding-block: 76px; grid-template-columns: 1fr; gap: 52px; }
@@ -239,7 +249,8 @@ footer { border-top: 1px solid var(--line); }
   .download-section { padding-block: 82px; }
   .privacy-layout { grid-template-columns: 1fr; gap: 42px; }
   .privacy-layout > div + div { padding: 42px 0 0; border-left: 0; border-top: 1px solid var(--line); }
-  .footer-inner { min-height: 70px; }
+  .footer-inner { min-height: 70px; align-items: flex-start; flex-direction: column; justify-content: center; gap: 12px; padding-block: 18px; }
+  .footer-links { gap: 12px 18px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

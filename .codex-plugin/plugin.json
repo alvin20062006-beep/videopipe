@@ -1,0 +1,44 @@
+{
+  "name": "videopipe",
+  "version": "1.0.0",
+  "description": "Install, use, update, and troubleshoot VideoPipe on Windows.",
+  "author": {
+    "name": "Alvin",
+    "url": "https://github.com/alvin20062006-beep"
+  },
+  "homepage": "https://alvin20062006-beep.github.io/videopipe/",
+  "repository": "https://github.com/alvin20062006-beep/videopipe",
+  "keywords": [
+    "video",
+    "download",
+    "windows",
+    "videopipe",
+    "troubleshooting"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "VideoPipe",
+    "shortDescription": "Install, use, and troubleshoot VideoPipe",
+    "longDescription": "Guides users through downloading, installing, running, updating, and troubleshooting the VideoPipe Windows application, with privacy-aware and bandwidth-conscious steps.",
+    "developerName": "Alvin",
+    "category": "Productivity",
+    "capabilities": [
+      "Instructions",
+      "Read"
+    ],
+    "websiteURL": "https://alvin20062006-beep.github.io/videopipe/",
+    "privacyPolicyURL": "https://alvin20062006-beep.github.io/videopipe/privacy.html",
+    "termsOfServiceURL": "https://alvin20062006-beep.github.io/videopipe/terms.html",
+    "defaultPrompt": [
+      "Help me install and start VideoPipe on Windows.",
+      "Troubleshoot a VideoPipe download or startup problem.",
+      "Explain how to use VideoPipe safely."
+    ],
+    "brandColor": "#1267F4",
+    "composerIcon": "./assets/videopipe-mark.svg",
+    "logo": "./assets/videopipe-mark.svg",
+    "screenshots": [
+      "./assets/videopipe-app.png"
+    ]
+  }
+}
