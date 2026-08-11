@@ -7,9 +7,8 @@
     {
       "name": "videopipe",
       "source": {
-        "source": "url",
-        "url": "https://github.com/alvin20062006-beep/videopipe.git",
-        "ref": "main"
+        "source": "local",
+        "path": "./plugins/videopipe"
       },
       "policy": {
         "installation": "AVAILABLE",
