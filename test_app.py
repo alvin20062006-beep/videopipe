@@ -1,4 +1,9 @@
-from app import JOBS, active_job_count, clean_error, concurrent_job_limit, extract_url, is_hls_url, is_manifest_url, is_wechat_share_url, quality_allowed
+import asyncio
+
+import pytest
+
+import app as videopipe_app
+from app import JOBS, LinkRequest, active_job_count, analyze, choose_media_candidates, clean_error, concurrent_job_limit, extract_url, inspect_hls_manifest, is_hls_url, is_manifest_url, is_probable_ad, is_wechat_share_url, media_request_headers, quality_allowed, score_media_candidate
 
 
 def test_share_text_url_extraction():
@@ -25,3 +30,101 @@ def test_parallel_job_count():
 def test_manifest_quality_regex_does_not_match_1080():
     assert not __import__("re").match(r".*x(480|[1-3][0-9]{2}|[1-9][0-9]?)$", "1920x1080")
     assert __import__("re").match(r".*x(480|[1-3][0-9]{2}|[1-9][0-9]?)$", "854x480")
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = body.encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def read(self, _limit):
+        return self.body
+
+
+def test_hls_manifest_requires_real_segments(monkeypatch):
+    manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\npart-1.ts\n#EXTINF:9.5,\npart-2.ts\n"
+    monkeypatch.setattr(videopipe_app, "urlopen", lambda *_args, **_kwargs: FakeResponse(manifest))
+    result = inspect_hls_manifest("https://cdn.example/show/main.m3u8", {})
+    assert result["segment_count"] == 2
+    assert result["duration"] == 19.5
+
+
+def test_hls_manifest_accepts_extensionless_segments(monkeypatch):
+    manifest = "#EXTM3U\n#EXTINF:10,\nsegment/1001?token=x\n#EXTINF:10,\nsegment/1002?token=x\n"
+    monkeypatch.setattr(videopipe_app, "urlopen", lambda *_args, **_kwargs: FakeResponse(manifest))
+    assert inspect_hls_manifest("https://cdn.example/show/main.m3u8", {})["segment_count"] == 2
+
+
+def test_hls_manifest_rejects_blank_placeholder(monkeypatch):
+    monkeypatch.setattr(videopipe_app, "urlopen", lambda *_args, **_kwargs: FakeResponse("#EXTM3U\n#EXT-X-ENDLIST\n"))
+    with pytest.raises(RuntimeError, match="媒体分片"):
+        inspect_hls_manifest("https://cdn.example/show/blank.m3u8", {})
+
+
+def test_hls_master_rejects_when_all_variants_are_invalid(monkeypatch):
+    manifests = {
+        "https://cdn.example/master.m3u8": "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=1280x720\nmissing.m3u8\n",
+        "https://cdn.example/missing.m3u8": "#EXTM3U\n#EXT-X-ENDLIST\n",
+    }
+    monkeypatch.setattr(videopipe_app, "urlopen", lambda request, **_kwargs: FakeResponse(manifests[request.full_url]))
+    with pytest.raises(RuntimeError, match="没有可用的视频线路"):
+        inspect_hls_manifest("https://cdn.example/master.m3u8", {})
+
+
+def test_cookie_headers_are_scoped_to_media_domain():
+    cookies = [{"name": "session", "value": "secret", "domain": ".yifan.tv"}]
+    same_site = media_request_headers("https://www.yifan.tv/play/1", "https://media.yifan.tv/main.m3u8", "ua", cookies)
+    cross_site = media_request_headers("https://www.yifan.tv/play/1", "https://cdn.example/main.m3u8", "ua", cookies)
+    assert same_site["Cookie"] == "session=secret"
+    assert "Cookie" not in cross_site
+
+
+def test_long_main_video_scores_above_short_ad():
+    main = {"kind": "hls", "url": "https://cdn.example/main.m3u8", "hits": 6, "dom_source": True, "inspection": {"duration": 1800, "segment_count": 30, "is_master": True}}
+    ad = {"kind": "hls", "url": "https://cdn.example/ads/preroll.m3u8", "hits": 10, "dom_source": False, "inspection": {"duration": 15, "segment_count": 3, "is_master": False}}
+    assert score_media_candidate(main) > score_media_candidate(ad) + 100
+    assert is_probable_ad(ad)
+    assert not is_probable_ad(main)
+
+
+def test_candidate_selection_drops_blank_and_short_ad(monkeypatch):
+    manifests = {
+        "https://cdn.example/blank.m3u8": "#EXTM3U\n#EXT-X-ENDLIST\n",
+        "https://cdn.example/ads/preroll.m3u8": "#EXTM3U\n#EXTINF:10,\na.ts\n#EXTINF:10,\nb.ts\n",
+        "https://cdn.example/main.m3u8": "#EXTM3U\n#EXTINF:60,\na.ts\n#EXTINF:60,\nb.ts\n",
+    }
+    monkeypatch.setattr(videopipe_app, "validate_public_url", lambda value: value)
+    monkeypatch.setattr(videopipe_app, "urlopen", lambda request, **_kwargs: FakeResponse(manifests[request.full_url]))
+    selected = choose_media_candidates([
+        {"kind": "hls", "url": "https://cdn.example/blank.m3u8", "hits": 8, "dom_source": True},
+        {"kind": "hls", "url": "https://cdn.example/ads/preroll.m3u8", "hits": 20, "dom_source": True},
+        {"kind": "hls", "url": "https://cdn.example/main.m3u8", "hits": 2, "dom_source": False},
+    ], "https://www.yifan.tv/play/1", "ua", [])
+    assert [candidate["url"] for candidate in selected] == ["https://cdn.example/main.m3u8"]
+
+
+def test_latest_signed_candidate_wins_deduplication(monkeypatch):
+    manifest = "#EXTM3U\n#EXTINF:60,\na.ts\n#EXTINF:60,\nb.ts\n"
+    monkeypatch.setattr(videopipe_app, "validate_public_url", lambda value: value)
+    monkeypatch.setattr(videopipe_app, "urlopen", lambda *_args, **_kwargs: FakeResponse(manifest))
+    selected = choose_media_candidates([
+        {"kind": "hls", "url": "https://cdn.example/main.m3u8?token=old", "hits": 5, "dom_source": False, "last_seen": 1},
+        {"kind": "hls", "url": "https://cdn.example/main.m3u8?token=new", "hits": 1, "dom_source": False, "last_seen": 2},
+    ], "https://www.yifan.tv/play/1", "ua", [])
+    assert selected[0]["url"].endswith("token=new")
+
+
+def test_browser_hls_analysis_does_not_create_download_job(monkeypatch):
+    JOBS.clear()
+    monkeypatch.setattr(videopipe_app, "validate_public_url", lambda value: value)
+    monkeypatch.setattr(videopipe_app, "analyze_sync", lambda *_args, **_kwargs: (_ for _ in ()).throw(videopipe_app.yt_dlp.utils.DownloadError("unsupported")))
+    selected = {"url": "https://cdn.example/main.m3u8", "kind": "hls", "headers": {"Referer": "https://example.com/watch"}, "inspection": {"duration": 120, "max_height": 720}}
+    monkeypatch.setattr(videopipe_app, "discover_media_sync", lambda _url: (selected["url"], selected["headers"], {"title": "Show", "thumbnail": None, "selected_candidate": selected}))
+    result = asyncio.run(analyze(LinkRequest(text="https://example.com/watch")))
+    assert result["resolved_url"] == selected["url"]
+    assert JOBS == {}

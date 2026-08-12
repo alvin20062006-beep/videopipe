@@ -15,7 +15,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import imageio_ffmpeg
@@ -273,6 +273,168 @@ def analyze_sync(url: str, headers: dict[str, str] | None = None) -> dict:
     }
 
 
+def media_request_headers(page_url: str, media_url: str, user_agent: str, cookies: list[dict]) -> dict[str, str]:
+    headers = {"Referer": page_url, "User-Agent": user_agent}
+    media_host = (urlparse(media_url).hostname or "").lower()
+    matching = []
+    for cookie in cookies:
+        domain = str(cookie.get("domain") or "").lstrip(".").lower()
+        if domain and (media_host == domain or media_host.endswith(f".{domain}")):
+            matching.append(f"{cookie['name']}={cookie['value']}")
+    if matching:
+        headers["Cookie"] = "; ".join(matching)
+    return headers
+
+
+def inspect_hls_manifest(url: str, headers: dict[str, str], timeout: float = 8) -> dict:
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=timeout) as response:
+        content = response.read(512_000).decode("utf-8", errors="replace")
+    if "#EXTM3U" not in content:
+        raise RuntimeError("播放清单内容无效")
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    durations = []
+    variants = []
+    max_height = None
+    max_bandwidth = 0
+    for index, line in enumerate(lines):
+        if line.startswith("#EXTINF:"):
+            try:
+                durations.append(float(line.split(":", 1)[1].split(",", 1)[0]))
+            except ValueError:
+                pass
+        if not line.startswith("#EXT-X-STREAM-INF:"):
+            continue
+        attributes = line.split(":", 1)[1]
+        resolution = re.search(r"RESOLUTION=\d+x(\d+)", attributes, re.IGNORECASE)
+        bandwidth = re.search(r"(?:AVERAGE-)?BANDWIDTH=(\d+)", attributes, re.IGNORECASE)
+        height = int(resolution.group(1)) if resolution else None
+        rate = int(bandwidth.group(1)) if bandwidth else 0
+        if height:
+            max_height = max(max_height or 0, height)
+        max_bandwidth = max(max_bandwidth, rate)
+        if index + 1 < len(lines) and not lines[index + 1].startswith("#"):
+            variants.append(urljoin(url, lines[index + 1]))
+
+    media_uris = [urljoin(url, line) for line in lines if not line.startswith("#")]
+    segments = [media_uri for media_uri in media_uris if media_uri not in variants]
+    is_master = bool(variants)
+    if not is_master and len(segments) < 2:
+        raise RuntimeError("播放清单没有足够的媒体分片")
+
+    detail = {
+        "valid": True,
+        "is_master": is_master,
+        "variants": variants,
+        "segment_count": len(segments),
+        "duration": sum(durations) if durations else None,
+        "max_height": max_height,
+        "max_bandwidth": max_bandwidth,
+    }
+    if is_master:
+        children = []
+        for variant in variants[-3:]:
+            try:
+                children.append(inspect_hls_manifest(variant, headers, timeout))
+            except (OSError, RuntimeError, URLError):
+                continue
+        if not children:
+            raise RuntimeError("主播放清单没有可用的视频线路")
+        best = max(children, key=lambda item: (item.get("max_height") or 0, item.get("max_bandwidth") or 0, item.get("duration") or 0))
+        detail["duration"] = best.get("duration")
+        detail["segment_count"] = best.get("segment_count", 0)
+        detail["max_height"] = max(detail.get("max_height") or 0, best.get("max_height") or 0) or None
+    return detail
+
+
+def score_media_candidate(candidate: dict) -> int:
+    score = {"hls": 120, "dash": 100, "video": 80}.get(candidate["kind"], 0)
+    score += min(candidate.get("hits", 1), 10) * 3
+    if candidate.get("dom_source"):
+        score += 25
+    inspection = candidate.get("inspection") or {}
+    duration = inspection.get("duration") or 0
+    if duration >= 120:
+        score += 60
+    elif duration >= 45:
+        score += 35
+    elif 0 < duration < 30:
+        score -= 45
+    score += min(inspection.get("segment_count") or 0, 30)
+    if inspection.get("is_master"):
+        score += 20
+    if re.search(r"(?:^|[._/-])(ad|ads|advert|preroll)(?:[._/?-]|$)", candidate["url"].lower()):
+        score -= 80
+    return score
+
+
+def is_probable_ad(candidate: dict) -> bool:
+    duration = (candidate.get("inspection") or {}).get("duration") or 0
+    explicit_ad_marker = bool(re.search(r"(?:^|[._/-])(ad|ads|advert|preroll)(?:[._/?-]|$)", candidate["url"].lower()))
+    return explicit_ad_marker and (not duration or duration < 90)
+
+
+def choose_media_candidates(candidates: list[dict], page_url: str, user_agent: str, cookies: list[dict]) -> list[dict]:
+    deduplicated: dict[str, dict] = {}
+    for candidate in candidates:
+        identity = candidate["url"].split("?", 1)[0]
+        current = deduplicated.get(identity)
+        if current is None or (candidate.get("last_seen", 0), candidate.get("hits", 0)) > (current.get("last_seen", 0), current.get("hits", 0)):
+            deduplicated[identity] = candidate
+
+    validated = []
+    for candidate in deduplicated.values():
+        try:
+            validate_public_url(candidate["url"])
+        except ValueError:
+            continue
+        headers = media_request_headers(page_url, candidate["url"], user_agent, cookies)
+        candidate = {**candidate, "headers": headers}
+        if candidate["kind"] == "hls":
+            try:
+                candidate["inspection"] = inspect_hls_manifest(candidate["url"], headers)
+            except (OSError, RuntimeError, URLError):
+                continue
+        candidate["score"] = score_media_candidate(candidate)
+        candidate["probable_ad"] = is_probable_ad(candidate)
+        validated.append(candidate)
+
+    master_variants = {
+        variant.split("?", 1)[0]
+        for candidate in validated
+        for variant in (candidate.get("inspection") or {}).get("variants", [])
+    }
+    validated = [
+        candidate
+        for candidate in validated
+        if candidate["url"].split("?", 1)[0] not in master_variants or (candidate.get("inspection") or {}).get("is_master")
+    ]
+    return sorted((candidate for candidate in validated if not candidate.get("probable_ad")), key=lambda item: item["score"], reverse=True)
+
+
+def discovered_media_result(url: str, page_meta: dict, candidate: dict) -> dict:
+    inspection = candidate.get("inspection") or {}
+    max_height = inspection.get("max_height")
+    title = page_meta.get("title") or "未命名视频"
+    return {
+        "url": candidate["url"],
+        "source_url": url,
+        "resolved_url": candidate["url"],
+        "headers": candidate["headers"],
+        "title": title.split("-免费在线观看", 1)[0],
+        "platform": f"{(urlparse(url).hostname or '网页').removeprefix('www.')} · 浏览器发现",
+        "duration": inspection.get("duration"),
+        "thumbnail": page_meta.get("thumbnail"),
+        "max_height": max_height,
+        "qualities": [
+            {"id": "best", "label": "最佳画质", "detail": f"最高 {max_height}P" if max_height else "最高可用"},
+            {"id": "720", "label": "720P", "detail": "高清", "available": not max_height or max_height >= 720},
+            {"id": "480", "label": "480P", "detail": "流畅", "available": not max_height or max_height >= 480},
+        ],
+    }
+
+
 def discover_media_sync(url: str) -> tuple[str, dict[str, str], dict]:
     edge = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
     if not edge.exists():
@@ -280,54 +442,73 @@ def discover_media_sync(url: str) -> tuple[str, dict[str, str], dict]:
     if not edge.exists():
         raise RuntimeError("没有找到可用于媒体发现的 Edge 浏览器")
 
-    candidates: list[tuple[int, str]] = []
+    captured: dict[str, dict] = {}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=str(edge), headless=True)
         try:
-            context = browser.new_context()
-            page = context.new_page()
+            page_meta = {"title": None, "thumbnail": None}
+            cookies = []
+            user_agent = "Mozilla/5.0"
+            for _attempt in range(2):
+                context = browser.new_context()
+                page = context.new_page()
 
-            def capture(response) -> None:
-                media_url = response.url
-                content_type = (response.header_value("content-type") or "").lower()
-                path = urlparse(media_url).path.lower()
-                if ".m3u8" in path or "mpegurl" in content_type:
-                    candidates.append((3, media_url))
-                elif ".mpd" in path or "dash+xml" in content_type:
-                    candidates.append((3, media_url))
-                elif path.endswith((".mp4", ".webm", ".mov")) or content_type.startswith("video/"):
-                    candidates.append((2, media_url))
+                def capture(response) -> None:
+                    media_url = response.url
+                    content_type = (response.header_value("content-type") or "").lower()
+                    path = urlparse(media_url).path.lower()
+                    kind = None
+                    if ".m3u8" in path or "mpegurl" in content_type:
+                        kind = "hls"
+                    elif ".mpd" in path or "dash+xml" in content_type:
+                        kind = "dash"
+                    elif path.endswith((".mp4", ".webm", ".mov")) or content_type.startswith("video/"):
+                        kind = "video"
+                    if kind:
+                        item = captured.setdefault(media_url, {"url": media_url, "kind": kind, "hits": 0, "dom_source": False, "last_seen": 0.0})
+                        item["hits"] += 1
+                        item["last_seen"] = time.monotonic()
 
-            page.on("response", capture)
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-                page.wait_for_timeout(8_000)
-            except PlaywrightTimeoutError:
-                pass
-            video = page.locator("video")
-            try:
-                source = video.first.get_attribute("src", timeout=1_000) if video.count() else None
-            except PlaywrightTimeoutError:
-                source = None
-            if source and source.startswith(("http://", "https://")):
-                candidates.append((1, source))
-            cookies = context.cookies()
-            user_agent = page.evaluate("navigator.userAgent")
-            page_meta = page.evaluate("""() => ({
-                title: document.title,
-                thumbnail: document.querySelector('meta[property="og:image"]')?.content || null
-            })""")
+                page.on("response", capture)
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+                    for _ in range(20):
+                        page.wait_for_timeout(1_000)
+                        try:
+                            page.locator("video").evaluate_all("videos => videos.forEach(video => { video.muted = true; video.play().catch(() => {}); })")
+                        except Exception:
+                            pass
+                except PlaywrightTimeoutError:
+                    pass
+                video_sources = page.locator("video").evaluate_all("videos => videos.flatMap(video => [video.currentSrc, video.src]).filter(Boolean)")
+                for source in video_sources:
+                    if source.startswith(("http://", "https://")):
+                        path = urlparse(source).path.lower()
+                        kind = "hls" if ".m3u8" in path else ("dash" if ".mpd" in path else "video")
+                        item = captured.setdefault(source, {"url": source, "kind": kind, "hits": 0, "dom_source": True, "last_seen": time.monotonic()})
+                        item["dom_source"] = True
+                cookies = context.cookies()
+                user_agent = page.evaluate("navigator.userAgent")
+                page_meta = page.evaluate("""() => ({
+                    title: document.title,
+                    thumbnail: document.querySelector('meta[property="og:image"]')?.content || null
+                })""")
+                context.close()
+                if captured:
+                    break
         finally:
             browser.close()
 
+    if not captured:
+        raise RuntimeError("页面已加载，但在两次尝试中都没有发现媒体流；播放器可能尚未启动或暂时限制访问")
+    candidates = choose_media_candidates(list(captured.values()), url, user_agent, cookies)
     if not candidates:
-        raise RuntimeError("浏览器加载了页面，但没有发现可下载的媒体流")
-    media_url = max(candidates, key=lambda item: item[0])[1]
+        raise RuntimeError("发现了媒体请求，但它们均为空白、失效、没有有效视频分片或仅为短广告")
+    selected = candidates[0]
+    media_url = selected["url"]
     validate_public_url(media_url)
-    headers = {"Referer": url, "User-Agent": user_agent}
-    if cookies:
-        headers["Cookie"] = "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
-    return media_url, headers, page_meta
+    page_meta["selected_candidate"] = selected
+    return media_url, selected["headers"], page_meta
 
 
 def download_manifest(job: dict, url: str, quality: str, output_dir: Path) -> None:
@@ -447,6 +628,9 @@ async def analyze(request: LinkRequest) -> dict:
             return await asyncio.to_thread(analyze_sync, url)
         except yt_dlp.utils.DownloadError:
             media_url, headers, page_meta = await asyncio.to_thread(discover_media_sync, url)
+            selected = page_meta.get("selected_candidate") or {}
+            if selected.get("kind") == "hls":
+                return discovered_media_result(url, page_meta, selected)
             result = await asyncio.to_thread(analyze_sync, media_url, headers)
             site = (urlparse(url).hostname or "网页").removeprefix("www.")
             page_title = page_meta.get("title")
