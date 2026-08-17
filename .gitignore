@@ -5,3 +5,4 @@ __pycache__/
 *.ytdl
 data/
 vendor/
+static/hls.min.js

@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const state = { text: "", video: null, quality: "720", jobs: new Map() };
 const linkInput = $("#link-input");
 const clearButton = $("#clear-button");
+let hlsPreview = null;
 
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds)) return "时长未知";
@@ -36,8 +37,59 @@ function showVideo(video) {
     });
     return button;
   }));
+  const alternatives = $("#alternatives");
+  alternatives.hidden = !(video.alternatives || []).length;
+  alternatives.replaceChildren(...(video.alternatives || []).map((candidate, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = index === 0 ? "selected" : "";
+    button.textContent = `${candidate.label} · ${formatDuration(candidate.duration)}${candidate.max_height ? ` · ${candidate.max_height}P` : ""}`;
+    button.addEventListener("click", () => {
+      state.video.resolved_url = candidate.resolved_url;
+      state.video.headers = candidate.headers;
+      state.video.duration = candidate.duration;
+      $("#duration").textContent = formatDuration(candidate.duration);
+      $("#thumbnail-duration").textContent = formatDuration(candidate.duration);
+      alternatives.querySelectorAll("button").forEach((item) => item.classList.toggle("selected", item === button));
+    });
+    return button;
+  }));
   $("#result").hidden = false;
 }
+
+async function openPreview() {
+  if (!state.video) return;
+  const dialog = $("#preview-dialog");
+  const player = $("#preview-video");
+  const message = $("#preview-message");
+  message.textContent = "正在准备预览…";
+  dialog.showModal();
+  try {
+    const preview = await api("/api/previews", { method: "POST", body: JSON.stringify({ resolved_url: state.video.resolved_url, headers: state.video.headers }) });
+    if (hlsPreview) hlsPreview.destroy();
+    if (preview.is_hls && !window.Hls?.isSupported()) throw new Error("本地预览组件未安装，请重新运行 install-dependencies.ps1");
+    if (preview.is_hls) {
+      hlsPreview = new window.Hls();
+      hlsPreview.loadSource(preview.url);
+      hlsPreview.attachMedia(player);
+    } else {
+      player.src = preview.url;
+    }
+    player.load();
+    message.textContent = "";
+  } catch (error) {
+    message.textContent = error.message;
+  }
+}
+
+$("#preview-button").addEventListener("click", openPreview);
+$("#close-preview").addEventListener("click", () => $("#preview-dialog").close());
+$("#preview-dialog").addEventListener("close", () => {
+  $("#preview-video").pause();
+  $("#preview-video").removeAttribute("src");
+  $("#preview-video").load();
+  if (hlsPreview) { hlsPreview.destroy(); hlsPreview = null; }
+});
 
 linkInput.addEventListener("input", () => { clearButton.hidden = !linkInput.value; });
 clearButton.addEventListener("click", () => {
