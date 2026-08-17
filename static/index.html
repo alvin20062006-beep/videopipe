@@ -46,15 +46,17 @@
     </section>
 
     <section id="result" class="result" hidden aria-label="解析结果">
-      <div class="thumbnail-wrap">
+      <button id="preview-button" class="thumbnail-wrap" type="button" aria-label="预览视频">
         <img id="thumbnail" alt="视频封面">
         <span id="thumbnail-duration"></span>
-      </div>
+        <span class="preview-label">点击预览</span>
+      </button>
       <div class="video-info">
         <h2 id="video-title"></h2>
         <div class="meta"><span><svg class="icon"><use href="#icon-video"/></svg><i id="platform"></i></span><span><svg class="icon"><use href="#icon-clock"/></svg><i id="duration"></i></span></div>
         <h3>选择画质</h3>
         <div id="qualities" class="qualities"></div>
+        <div id="alternatives" class="alternatives" hidden></div>
       </div>
       <div class="result-actions">
         <button id="download-button" class="primary"><svg class="icon"><use href="#icon-download"/></svg>下载到本地</button>
@@ -69,6 +71,13 @@
 
   </main>
 
+  <dialog id="preview-dialog" aria-label="视频预览">
+    <button id="close-preview" type="button" aria-label="关闭预览">×</button>
+    <video id="preview-video" controls playsinline></video>
+    <p id="preview-message" role="status"></p>
+  </dialog>
+
+  <script src="/hls.min.js"></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

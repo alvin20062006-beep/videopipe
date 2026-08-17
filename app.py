@@ -15,14 +15,14 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import imageio_ffmpeg
 import yt_dlp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.background import BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -35,6 +35,9 @@ DOWNLOAD_DIR = DATA_DIR / "jobs"
 DATABASE = DATA_DIR / "videopipe.db"
 NM3U8_EXE = ROOT / "vendor" / "N_m3u8DL-RE" / "N_m3u8DL-RE.exe"
 ARIA2_EXE = ROOT / "vendor" / "aria2" / "aria2-1.37.0-win-64bit-build1" / "aria2c.exe"
+WECHAT_DIR = ROOT / "vendor" / "wx_channels_download"
+WECHAT_EXE = WECHAT_DIR / "wx_video_download.exe"
+WECHAT_CONFIG = WECHAT_DIR / "config.yaml"
 QUALITY_FORMATS = {
     "best": "bestvideo*+bestaudio/best",
     "720": "bestvideo*[height<=720]+bestaudio/best[height<=720]/best",
@@ -42,10 +45,14 @@ QUALITY_FORMATS = {
 }
 JOBS: dict[str, dict] = {}
 ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
+WECHAT_PROCESS: subprocess.Popen | None = None
+PREVIEWS: dict[str, dict] = {}
 DOWNLOAD_SEMAPHORE: asyncio.Semaphore | None = None
 URL_RE = re.compile(r"https?://[^\s<>\"'，。；：！？、（）【】《》「」『』]+", re.IGNORECASE)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-WECHAT_RESOLVER = "https://sph.litao.workers.dev/api/fetch_video_profile"
+# wx_channels_download exposes this endpoint locally. A user can point this at
+# their own deployment without sending their Yuanbao cookie through VideoPipe.
+WECHAT_RESOLVER = os.environ.get("VIDEOPIPE_WECHAT_RESOLVER", "http://127.0.0.1:2022/api/channels/parse_sph")
 
 class LinkRequest(BaseModel):
     text: str
@@ -57,6 +64,11 @@ class DownloadRequest(LinkRequest):
     thumbnail: str | None = None
     platform: str | None = None
     resolved_url: str | None = None
+    headers: dict[str, str] | None = None
+
+
+class PreviewRequest(BaseModel):
+    resolved_url: str
     headers: dict[str, str] | None = None
 
 
@@ -98,6 +110,39 @@ def active_job_count() -> int:
 
 def clean_error(error: Exception) -> str:
     return ANSI_RE.sub("", str(error)).strip()[:500]
+
+
+def local_wechat_resolver() -> bool:
+    parsed = urlparse(WECHAT_RESOLVER)
+    return parsed.hostname in {"127.0.0.1", "localhost", "::1"} and (parsed.port or 80) == 2022
+
+
+def wechat_service_running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 2022), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def start_wechat_service() -> None:
+    global WECHAT_PROCESS
+    if not local_wechat_resolver() or wechat_service_running() or not WECHAT_EXE.exists():
+        return
+    WECHAT_PROCESS = subprocess.Popen(
+        [str(WECHAT_EXE), "server", "-c", str(WECHAT_CONFIG)],
+        cwd=WECHAT_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+
+
+def stop_wechat_service() -> None:
+    global WECHAT_PROCESS
+    if WECHAT_PROCESS and WECHAT_PROCESS.poll() is None:
+        WECHAT_PROCESS.terminate()
+    WECHAT_PROCESS = None
 
 
 def stop_process_tree(job_id: str) -> None:
@@ -214,23 +259,23 @@ def is_wechat_share_url(url: str) -> bool:
     return parsed.hostname == "weixin.qq.com" and parsed.path.startswith("/sph/")
 
 
+def is_douyin_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "douyin.com" or host.endswith(".douyin.com")
+
+
 def resolve_wechat_sync(url: str) -> dict:
-    request = Request(
-        WECHAT_RESOLVER,
-        data=json.dumps({"url": url}).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "VideoPipe/1.0"},
-        method="POST",
-    )
+    request = Request(f"{WECHAT_RESOLVER}?{urlencode({'url': url})}", headers={"User-Agent": "VideoPipe/1.0"})
     try:
         with urlopen(request, timeout=30) as response:
             payload = json.load(response)
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError("微信视频号公开解析服务暂时不可用") from exc
+        raise RuntimeError("微信视频号需要本地 wx_channels_download 服务；请启动它，或设置 VIDEOPIPE_WECHAT_RESOLVER") from exc
     data = payload.get("data") or {}
     if "feedInfo" not in data:
         data = data.get("data") or {}
     feed = data.get("feedInfo") or {}
-    video_url = feed.get("videoUrl") or (feed.get("h264VideoInfo") or {}).get("videoUrl")
+    video_url = feed.get("originVideoUrl") or feed.get("videoUrl") or (feed.get("h264VideoInfo") or {}).get("videoUrl")
     if not video_url:
         raise RuntimeError("这个微信视频号分享链接没有返回可下载的视频")
     validate_public_url(video_url)
@@ -353,6 +398,8 @@ def score_media_candidate(candidate: dict) -> int:
     score += min(candidate.get("hits", 1), 10) * 3
     if candidate.get("dom_source"):
         score += 25
+    if candidate.get("main_player"):
+        score += 60
     inspection = candidate.get("inspection") or {}
     duration = inspection.get("duration") or 0
     if duration >= 120:
@@ -417,7 +464,7 @@ def discovered_media_result(url: str, page_meta: dict, candidate: dict) -> dict:
     inspection = candidate.get("inspection") or {}
     max_height = inspection.get("max_height")
     title = page_meta.get("title") or "未命名视频"
-    return {
+    result = {
         "url": candidate["url"],
         "source_url": url,
         "resolved_url": candidate["url"],
@@ -433,6 +480,63 @@ def discovered_media_result(url: str, page_meta: dict, candidate: dict) -> dict:
             {"id": "480", "label": "480P", "detail": "流畅", "available": not max_height or max_height >= 480},
         ],
     }
+    candidates = page_meta.get("candidates") or []
+    if len(candidates) > 1 and candidates[0]["score"] - candidates[1]["score"] < 35:
+        result["alternatives"] = [
+            {
+                "resolved_url": item["url"],
+                "headers": item["headers"],
+                "duration": (item.get("inspection") or {}).get("duration"),
+                "max_height": (item.get("inspection") or {}).get("max_height"),
+                "label": f"候选视频 {index + 1}",
+            }
+            for index, item in enumerate(candidates[:3])
+        ]
+    return result
+
+
+def preview_url(preview_id: str, url: str) -> str:
+    return f"/api/previews/{preview_id}/resource?url={quote(url, safe='')}"
+
+
+def rewrite_hls_manifest(preview_id: str, manifest_url: str, body: str) -> str:
+    def replace_uri(match: re.Match) -> str:
+        return f'URI="{preview_url(preview_id, urljoin(manifest_url, match.group(1)))}"'
+
+    lines = []
+    for line in body.splitlines():
+        if line.startswith("#"):
+            lines.append(re.sub(r'URI="([^"]+)"', replace_uri, line))
+        elif line.strip():
+            lines.append(preview_url(preview_id, urljoin(manifest_url, line.strip())))
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def remote_preview_response(preview_id: str, url: str, request_headers: dict[str, str], byte_range: str | None) -> StreamingResponse:
+    validate_public_url(url)
+    headers = {"User-Agent": "VideoPipe/1.0", **request_headers}
+    if byte_range:
+        headers["Range"] = byte_range
+    response = urlopen(Request(url, headers=headers), timeout=30)
+    content_type = response.headers.get_content_type()
+    final_url = response.geturl()
+    if is_hls_url(final_url) or "mpegurl" in content_type:
+        manifest = response.read().decode("utf-8", "replace")
+        response.close()
+        return StreamingResponse(iter([rewrite_hls_manifest(preview_id, final_url, manifest)]), media_type="application/vnd.apple.mpegurl")
+
+    passthrough = {key: value for key in ("Accept-Ranges", "Content-Length", "Content-Range") if (value := response.headers.get(key))}
+
+    def chunks():
+        try:
+            while chunk := response.read(64 * 1024):
+                yield chunk
+        finally:
+            response.close()
+
+    return StreamingResponse(chunks(), status_code=response.status, media_type=content_type or "video/mp4", headers=passthrough)
 
 
 def discover_media_sync(url: str) -> tuple[str, dict[str, str], dict]:
@@ -449,7 +553,7 @@ def discover_media_sync(url: str) -> tuple[str, dict[str, str], dict]:
             page_meta = {"title": None, "thumbnail": None}
             cookies = []
             user_agent = "Mozilla/5.0"
-            for _attempt in range(2):
+            for _attempt in range(1):
                 context = browser.new_context()
                 page = context.new_page()
 
@@ -465,34 +569,42 @@ def discover_media_sync(url: str) -> tuple[str, dict[str, str], dict]:
                     elif path.endswith((".mp4", ".webm", ".mov")) or content_type.startswith("video/"):
                         kind = "video"
                     if kind:
-                        item = captured.setdefault(media_url, {"url": media_url, "kind": kind, "hits": 0, "dom_source": False, "last_seen": 0.0})
+                        item = captured.setdefault(media_url, {"url": media_url, "kind": kind, "hits": 0, "dom_source": False, "main_player": False, "last_seen": 0.0})
                         item["hits"] += 1
                         item["last_seen"] = time.monotonic()
 
                 page.on("response", capture)
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-                    for _ in range(20):
+                    page.goto(url, wait_until="domcontentloaded", timeout=12_000)
+                    for _ in range(8):
                         page.wait_for_timeout(1_000)
                         try:
-                            page.locator("video").evaluate_all("videos => videos.forEach(video => { video.muted = true; video.play().catch(() => {}); })")
+                            page.locator("video").evaluate_all("videos => { const visible = videos.filter(video => video.offsetWidth && video.offsetHeight); const main = visible.sort((a, b) => b.offsetWidth * b.offsetHeight - a.offsetWidth * a.offsetHeight)[0]; if (main) { main.muted = true; main.play().catch(() => {}); } }")
                         except Exception:
                             pass
                 except PlaywrightTimeoutError:
                     pass
-                video_sources = page.locator("video").evaluate_all("videos => videos.flatMap(video => [video.currentSrc, video.src]).filter(Boolean)")
-                for source in video_sources:
-                    if source.startswith(("http://", "https://")):
-                        path = urlparse(source).path.lower()
-                        kind = "hls" if ".m3u8" in path else ("dash" if ".mpd" in path else "video")
-                        item = captured.setdefault(source, {"url": source, "kind": kind, "hits": 0, "dom_source": True, "last_seen": time.monotonic()})
-                        item["dom_source"] = True
-                cookies = context.cookies()
-                user_agent = page.evaluate("navigator.userAgent")
-                page_meta = page.evaluate("""() => ({
-                    title: document.title,
-                    thumbnail: document.querySelector('meta[property="og:image"]')?.content || null
-                })""")
+                except Exception:
+                    pass
+                try:
+                    video_sources = page.locator("video").evaluate_all("videos => videos.map(video => ({ url: video.currentSrc || video.src, area: video.offsetWidth * video.offsetHeight })).filter(video => video.url)")
+                    main_source = max(video_sources, key=lambda item: item["area"], default={}).get("url")
+                    for source_info in video_sources:
+                        source = source_info["url"]
+                        if source.startswith(("http://", "https://")):
+                            path = urlparse(source).path.lower()
+                            kind = "hls" if ".m3u8" in path else ("dash" if ".mpd" in path else "video")
+                            item = captured.setdefault(source, {"url": source, "kind": kind, "hits": 0, "dom_source": True, "main_player": False, "last_seen": time.monotonic()})
+                            item["dom_source"] = True
+                            item["main_player"] = item["main_player"] or source == main_source
+                    cookies = context.cookies()
+                    user_agent = page.evaluate("navigator.userAgent")
+                    page_meta = page.evaluate("""() => ({
+                        title: document.title,
+                        thumbnail: document.querySelector('meta[property="og:image"]')?.content || null
+                    })""")
+                except Exception:
+                    pass
                 context.close()
                 if captured:
                     break
@@ -508,6 +620,7 @@ def discover_media_sync(url: str) -> tuple[str, dict[str, str], dict]:
     media_url = selected["url"]
     validate_public_url(media_url)
     page_meta["selected_candidate"] = selected
+    page_meta["candidates"] = candidates
     return media_url, selected["headers"], page_meta
 
 
@@ -607,12 +720,14 @@ async def run_download(job_id: str, url: str, quality: str) -> None:
 async def lifespan(_: FastAPI):
     global DOWNLOAD_SEMAPHORE
     init_storage()
+    start_wechat_service()
     load_jobs()
     DOWNLOAD_SEMAPHORE = asyncio.Semaphore(concurrent_job_limit())
     for job in list(JOBS.values()):
         if job["status"] == "queued":
             asyncio.create_task(run_download(job["id"], job["url"], job["quality"]))
     yield
+    stop_wechat_service()
 
 
 app = FastAPI(title="VideoPipe", lifespan=lifespan)
@@ -624,28 +739,45 @@ async def analyze(request: LinkRequest) -> dict:
         url = validate_public_url(extract_url(request.text))
         if is_wechat_share_url(url):
             return await asyncio.to_thread(resolve_wechat_sync, url)
+        if is_douyin_url(url):
+            try:
+                return await asyncio.to_thread(analyze_sync, url)
+            except yt_dlp.utils.DownloadError as exc:
+                raise RuntimeError(f"抖音作品详情没有返回可验证的视频；为避免误下载广告，已停止浏览器抓流。请更新本机抖音 Cookie 后重试：{clean_error(exc)}") from exc
         try:
             return await asyncio.to_thread(analyze_sync, url)
         except yt_dlp.utils.DownloadError:
-            media_url, headers, page_meta = await asyncio.to_thread(discover_media_sync, url)
+            _, _, page_meta = await asyncio.to_thread(discover_media_sync, url)
             selected = page_meta.get("selected_candidate") or {}
-            if selected.get("kind") == "hls":
-                return discovered_media_result(url, page_meta, selected)
-            result = await asyncio.to_thread(analyze_sync, media_url, headers)
-            site = (urlparse(url).hostname or "网页").removeprefix("www.")
-            page_title = page_meta.get("title")
-            if page_title and result["title"].lower() in {"chunklist", "master", "index", "playlist", "playback1"}:
-                result["title"] = page_title.split("-免费在线观看", 1)[0]
-            if page_meta.get("thumbnail"):
-                result["thumbnail"] = page_meta["thumbnail"]
-            result.update(source_url=url, resolved_url=media_url, headers=headers, platform=f"{site} · 浏览器发现")
-            return result
+            return discovered_media_result(url, page_meta, selected)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except yt_dlp.utils.DownloadError as exc:
         raise HTTPException(422, f"暂时无法解析这个链接：{clean_error(exc)}") from exc
     except (RuntimeError, PlaywrightTimeoutError) as exc:
         raise HTTPException(422, f"暂时无法解析这个链接：{clean_error(exc)}") from exc
+
+
+@app.post("/api/previews")
+async def create_preview(request: PreviewRequest) -> dict:
+    try:
+        url = validate_public_url(request.resolved_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    preview_id = uuid.uuid4().hex
+    PREVIEWS[preview_id] = {"url": url, "headers": request.headers or {}, "created_at": time.time()}
+    return {"url": preview_url(preview_id, url), "is_hls": is_hls_url(url)}
+
+
+@app.get("/api/previews/{preview_id}/resource")
+async def preview_resource(preview_id: str, url: str, request: FastAPIRequest):
+    preview = PREVIEWS.get(preview_id)
+    if not preview or time.time() - preview["created_at"] > 3600:
+        raise HTTPException(404, "预览已过期，请重新解析")
+    try:
+        return await asyncio.to_thread(remote_preview_response, preview_id, url, preview["headers"], request.headers.get("range"))
+    except Exception as exc:
+        raise HTTPException(502, f"预览加载失败：{clean_error(exc)}") from exc
 
 
 @app.post("/api/jobs", status_code=202)
